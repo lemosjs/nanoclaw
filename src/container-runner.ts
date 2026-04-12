@@ -4,6 +4,7 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -195,6 +196,25 @@ function buildVolumeMounts(
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
       fs.cpSync(srcDir, dstDir, { recursive: true });
+    }
+  }
+
+  // Sync global skills from host's ~/.claude/skills/ into container
+  const globalSkillsSrc = path.join(os.homedir(), '.claude', 'skills');
+  if (fs.existsSync(globalSkillsSrc)) {
+    for (const entry of fs.readdirSync(globalSkillsSrc)) {
+      const srcPath = path.join(globalSkillsSrc, entry);
+      const dstPath = path.join(skillsDst, entry);
+      // Handle symlinks by resolving them
+      const stat = fs.lstatSync(srcPath);
+      if (stat.isSymbolicLink()) {
+        const realPath = fs.realpathSync(srcPath);
+        if (fs.existsSync(realPath) && fs.statSync(realPath).isDirectory()) {
+          fs.cpSync(realPath, dstPath, { recursive: true });
+        }
+      } else if (stat.isDirectory()) {
+        fs.cpSync(srcPath, dstPath, { recursive: true });
+      }
     }
   }
   mounts.push({
