@@ -49,6 +49,14 @@ RUN wget -qO- https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor 
     && apt-get install -y mongodb-mongosh \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash \
+    && ln -s /root/.bun/bin/bun /usr/local/bin/bun \
+    && ln -s /root/.bun/bin/bunx /usr/local/bin/bunx
+
+# Install pnpm (yarn comes with corepack)
+RUN npm install -g pnpm && corepack enable
+
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
