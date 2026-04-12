@@ -542,6 +542,7 @@ async function runQuery(
   const q = query({
     prompt: stream,
     options: {
+      model: 'claude-sonnet-4-5-20250514',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
