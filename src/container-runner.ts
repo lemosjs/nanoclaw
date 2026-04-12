@@ -284,6 +284,11 @@ async function buildContainerArgs(
     '-e',
     'GIT_SSH_COMMAND=ssh -i /host/root/.ssh/id_ed25519 -o StrictHostKeyChecking=no',
   );
+  // Use host git identity
+  args.push('-e', 'GIT_AUTHOR_NAME=Lemos AI');
+  args.push('-e', 'GIT_AUTHOR_EMAIL=gohanpeixe@gmail.com');
+  args.push('-e', 'GIT_COMMITTER_NAME=Lemos AI');
+  args.push('-e', 'GIT_COMMITTER_EMAIL=gohanpeixe@gmail.com');
   // Point HOME to host home for tools that need config files
   args.push('-e', 'HOST_HOME=/host/root');
 
