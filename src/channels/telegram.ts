@@ -178,22 +178,14 @@ export class TelegramChannel implements Channel {
         );
         ctx.reply('⏸ Interrupting the current run — send your next message.');
       } catch (err) {
-        logger.error(
-          { chatJid, err },
-          'Failed to write _interrupt sentinel',
-        );
+        logger.error({ chatJid, err }, 'Failed to write _interrupt sentinel');
         ctx.reply('Failed to signal interrupt. Check logs.');
       }
     });
 
     // Telegram bot commands handled above — skip them in the general handler
     // so they don't also get stored as messages. All other /commands flow through.
-    const TELEGRAM_BOT_COMMANDS = new Set([
-      'chatid',
-      'ping',
-      'quiet',
-      'stop',
-    ]);
+    const TELEGRAM_BOT_COMMANDS = new Set(['chatid', 'ping', 'quiet', 'stop']);
 
     this.bot.on('message:text', async (ctx) => {
       if (ctx.message.text.startsWith('/')) {

@@ -162,9 +162,7 @@ function createSchema(database: Database.Database): void {
   // calls and intermediate reasoning are forwarded as separate messages too.
   // Default is quiet (1) to preserve the stock NanoClaw UX.
   try {
-    database.exec(
-      `ALTER TABLE chats ADD COLUMN quiet_mode INTEGER DEFAULT 1`,
-    );
+    database.exec(`ALTER TABLE chats ADD COLUMN quiet_mode INTEGER DEFAULT 1`);
   } catch {
     /* column already exists */
   }

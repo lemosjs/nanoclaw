@@ -269,6 +269,17 @@ async function buildContainerArgs(
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
+  // Full host access: privileged mode + entire filesystem mounted
+  args.push('--privileged');
+  args.push('-v', '/:/host');
+  args.push('--network', 'host');
+  args.push('--pid', 'host');
+  // Extend PATH to include host binaries at /host
+  args.push(
+    '-e',
+    'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host/usr/local/bin:/host/usr/bin:/host/root/.bun/bin',
+  );
+
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 

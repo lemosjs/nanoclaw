@@ -223,8 +223,7 @@ function formatTraceEvent(
   trace: NonNullable<ContainerOutput['trace']>,
 ): string {
   const MAX = 300;
-  const trunc = (s: string) =>
-    s.length > MAX ? `${s.slice(0, MAX)}…` : s;
+  const trunc = (s: string) => (s.length > MAX ? `${s.slice(0, MAX)}…` : s);
   if (trace.kind === 'tool_use') {
     const label = trace.tool ? `*${trace.tool}*` : '*tool*';
     return `🔧 ${label}\n${trunc(trace.summary)}`;
