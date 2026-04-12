@@ -252,6 +252,14 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // The agent container is a single-purpose sandbox: ephemeral, no host access,
+  // all outbound traffic forced through the OneCLI proxy, filesystem scoped to
+  // bind-mounted writable paths. Tell Claude Code that so it permits running
+  // with --dangerously-skip-permissions even when the container process is
+  // root (which is required for file-permission compatibility when the host
+  // NanoClaw service runs as root — see --user handling below).
+  args.push('-e', 'IS_SANDBOX=1');
+
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
   const onecliApplied = await onecli.applyContainerConfig(args, {
@@ -271,11 +279,23 @@ async function buildContainerArgs(
   args.push(...hostGatewayArgs());
 
   // Run as host user so bind-mounted files are accessible.
-  // Skip when running as root (uid 0), as the container's node user (uid 1000),
-  // or when getuid is unavailable (native Windows without WSL).
+  //
+  // When NanoClaw runs as root on the host (e.g. Linux system-level systemd
+  // unit), the container's default `node` user (uid 1000) cannot unlink the
+  // root-owned files it sees in the bind-mounted IPC directory, because unlink
+  // permission comes from the parent directory. The agent-runner then loops
+  // forever on EACCES and never returns, blocking subsequent messages for that
+  // group. Force the container to run as root too (with HOME pointed at
+  // /home/node so Claude Code still finds the mounted .claude directory).
+  //
+  // Skip when getuid is unavailable (native Windows without WSL), and when
+  // host uid is 1000 (matches the container's default — no override needed).
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+  if (hostUid === 0) {
+    args.push('--user', '0:0');
+    args.push('-e', 'HOME=/home/node');
+  } else if (hostUid != null && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
   }
