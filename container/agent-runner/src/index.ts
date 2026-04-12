@@ -35,11 +35,18 @@ interface ContainerInput {
   script?: string;
 }
 
+interface ContainerTraceEvent {
+  kind: 'tool_use' | 'thinking' | 'interrupted';
+  tool?: string;
+  summary: string;
+}
+
 interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
   error?: string;
+  trace?: ContainerTraceEvent;
 }
 
 interface SessionEntry {
@@ -62,7 +69,9 @@ interface SDKUserMessage {
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
 const IPC_POLL_MS = 500;
+const VERBOSE = process.env.NANOCLAW_VERBOSE === '1';
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -305,6 +314,77 @@ function shouldClose(): boolean {
 }
 
 /**
+ * Check for _interrupt sentinel (soft Ctrl+C). Consumes the sentinel so a
+ * single /stop command interrupts at most one query.
+ */
+function shouldInterrupt(): boolean {
+  if (fs.existsSync(IPC_INPUT_INTERRUPT_SENTINEL)) {
+    try {
+      fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Emit a streamed trace event back to the host. No-op when NANOCLAW_VERBOSE
+ * is unset. Used to surface tool calls and intermediate reasoning to chats
+ * that have quiet_mode disabled.
+ */
+function writeTrace(event: ContainerTraceEvent): void {
+  if (!VERBOSE) return;
+  writeOutput({
+    status: 'success',
+    result: null,
+    trace: event,
+  });
+}
+
+/**
+ * Summarize a ToolUse content block into a single short line suitable for
+ * a chat bubble. Never throws; returns a best-effort string.
+ */
+function summarizeToolUse(
+  name: string,
+  input: Record<string, unknown> | undefined,
+): string {
+  if (!input || typeof input !== 'object') return name;
+  const oneLine = (s: string) =>
+    s.replace(/\s+/g, ' ').trim().slice(0, 200);
+  // Known tools first — hand-picked field order makes output readable.
+  switch (name) {
+    case 'Bash':
+      return oneLine(String(input.command ?? ''));
+    case 'Read':
+    case 'Edit':
+    case 'Write':
+    case 'NotebookEdit':
+      return oneLine(String(input.file_path ?? input.path ?? ''));
+    case 'Glob':
+      return oneLine(String(input.pattern ?? ''));
+    case 'Grep':
+      return oneLine(String(input.pattern ?? ''));
+    case 'WebFetch':
+    case 'WebSearch':
+      return oneLine(String(input.url ?? input.query ?? ''));
+    case 'Task':
+      return oneLine(String(input.description ?? input.subagent_type ?? ''));
+    case 'TodoWrite':
+      return 'updated todo list';
+  }
+  // Fallback: pick the first string-valued field.
+  for (const [k, v] of Object.entries(input)) {
+    if (typeof v === 'string' && v.length > 0) {
+      return oneLine(`${k}=${v}`);
+    }
+  }
+  return name;
+}
+
+/**
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
@@ -382,19 +462,43 @@ async function runQuery(
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
+  interruptedDuringQuery: boolean;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
 
-  // Poll IPC for follow-up messages and _close sentinel during the query
+  // Poll IPC for follow-up messages, _close sentinel, and _interrupt sentinel
+  // during the query. Interrupt calls Query.interrupt() which cancels the
+  // in-flight generation / tool call and ends the for-await loop cleanly.
   let ipcPolling = true;
   let closedDuringQuery = false;
+  let interruptedDuringQuery = false;
+  let interruptFn: (() => Promise<void>) | null = null;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
       log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
       stream.end();
+      ipcPolling = false;
+      return;
+    }
+    if (shouldInterrupt()) {
+      log('Interrupt sentinel detected during query, calling Query.interrupt()');
+      interruptedDuringQuery = true;
+      if (interruptFn) {
+        interruptFn().catch((err: unknown) => {
+          log(
+            `Query.interrupt() failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      } else {
+        // SDK too old for control channel — fall back to ending the stream.
+        stream.end();
+      }
+      // Stop polling and stop draining IPC. Any pending user messages sent
+      // between /stop and the interrupt landing stay in the IPC dir and
+      // become the next query's prompt via the outer loop's waitForIpcMessage().
       ipcPolling = false;
       return;
     }
@@ -435,7 +539,7 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  for await (const message of query({
+  const q = query({
     prompt: stream,
     options: {
       cwd: '/workspace/group',
@@ -491,8 +595,15 @@ async function runQuery(
         ],
       },
     },
-  })) {
-    messageCount++;
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  interruptFn = typeof (q as any).interrupt === 'function'
+    ? () => (q as any).interrupt()
+    : null;
+
+  try {
+    for await (const message of q) {
+      messageCount++;
     const msgType =
       message.type === 'system'
         ? `system/${(message as { subtype?: string }).subtype}`
@@ -501,6 +612,41 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+
+      // Verbose mode: surface tool calls and intermediate reasoning as
+      // streamed trace events so the user can see what the agent is doing.
+      if (VERBOSE) {
+        const blocks =
+          (message as {
+            message?: {
+              content?: Array<{
+                type?: string;
+                name?: string;
+                input?: Record<string, unknown>;
+                text?: string;
+                thinking?: string;
+              }>;
+            };
+          }).message?.content ?? [];
+        for (const block of blocks) {
+          if (block.type === 'tool_use' && block.name) {
+            writeTrace({
+              kind: 'tool_use',
+              tool: block.name,
+              summary: summarizeToolUse(block.name, block.input),
+            });
+          } else if (
+            block.type === 'thinking' &&
+            typeof block.thinking === 'string' &&
+            block.thinking.trim()
+          ) {
+            writeTrace({
+              kind: 'thinking',
+              summary: block.thinking.trim(),
+            });
+          }
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
@@ -535,13 +681,43 @@ async function runQuery(
         newSessionId,
       });
     }
+    }
+  } catch (err) {
+    // An interrupt mid-query often surfaces as a thrown error from the
+    // underlying iterator (e.g. AbortError). That's expected — swallow it
+    // and let the outer loop continue on. Unexpected errors propagate.
+    if (!interruptedDuringQuery) {
+      throw err;
+    }
+    log(
+      `for-await threw after interrupt (expected): ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   ipcPolling = false;
   log(
-    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+
+  if (interruptedDuringQuery) {
+    // Always forward a visible ack so the user knows /stop actually landed,
+    // even when quiet_mode is on. The host formats this into a chat bubble.
+    writeOutput({
+      status: 'success',
+      result: null,
+      trace: {
+        kind: 'interrupted',
+        summary: 'stopped — send your next message to steer',
+      },
+    });
+  }
+
+  return {
+    newSessionId,
+    lastAssistantUuid,
+    closedDuringQuery,
+    interruptedDuringQuery,
+  };
 }
 
 interface ScriptResult {
@@ -634,9 +810,14 @@ async function main(): Promise<void> {
   let sessionId = containerInput.sessionId;
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
-  // Clean up stale _close sentinel from previous container runs
+  // Clean up stale _close and _interrupt sentinels from previous container runs
   try {
     fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
   } catch {
     /* ignore */
   }

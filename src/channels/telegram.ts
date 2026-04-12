@@ -5,8 +5,12 @@ import path from 'path';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { toggleQuietMode } from '../db.js';
 import { readEnvFile } from '../env.js';
-import { resolveGroupFolderPath } from '../group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+} from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
@@ -135,9 +139,61 @@ export class TelegramChannel implements Channel {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
 
+    // /quiet — toggle whether tool calls and intermediate reasoning are shown
+    // in this chat. Default is quiet (only the final answer).
+    this.bot.command('quiet', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const isQuiet = toggleQuietMode(chatJid);
+      logger.info({ chatJid, isQuiet }, 'Toggled quiet mode');
+      ctx.reply(
+        isQuiet
+          ? '🔇 Quiet mode on — only final answers will be sent.'
+          : '🗣 Quiet mode off — tool calls and intermediate reasoning will be streamed here too.',
+      );
+    });
+
+    // /stop — soft interrupt of the in-flight agent query for this group,
+    // analogous to Ctrl+C in a claude-code chat. Drops a sentinel file into
+    // the group's IPC input dir; the container's agent-runner picks it up on
+    // its next poll tick and calls Query.interrupt() on the SDK. The
+    // container stays alive and ready to handle the user's next (steering)
+    // message on the same session.
+    this.bot.command('stop', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const groups = this.opts.registeredGroups();
+      const group = groups[chatJid];
+      if (!group) {
+        ctx.reply('No registered group for this chat — nothing to stop.');
+        return;
+      }
+      try {
+        const ipcDir = resolveGroupIpcPath(group.folder);
+        const inputDir = path.join(ipcDir, 'input');
+        fs.mkdirSync(inputDir, { recursive: true });
+        const sentinel = path.join(inputDir, '_interrupt');
+        fs.writeFileSync(sentinel, '');
+        logger.info(
+          { chatJid, folder: group.folder, sentinel },
+          'Wrote _interrupt sentinel',
+        );
+        ctx.reply('⏸ Interrupting the current run — send your next message.');
+      } catch (err) {
+        logger.error(
+          { chatJid, err },
+          'Failed to write _interrupt sentinel',
+        );
+        ctx.reply('Failed to signal interrupt. Check logs.');
+      }
+    });
+
     // Telegram bot commands handled above — skip them in the general handler
     // so they don't also get stored as messages. All other /commands flow through.
-    const TELEGRAM_BOT_COMMANDS = new Set(['chatid', 'ping']);
+    const TELEGRAM_BOT_COMMANDS = new Set([
+      'chatid',
+      'ping',
+      'quiet',
+      'stop',
+    ]);
 
     this.bot.on('message:text', async (ctx) => {
       if (ctx.message.text.startsWith('/')) {

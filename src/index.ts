@@ -33,6 +33,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
+  getQuietMode,
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
@@ -215,6 +216,29 @@ export function _setRegisteredGroups(
 }
 
 /**
+ * Render a streamed trace event into a short chat-friendly message.
+ * Returns an empty string to suppress a given event.
+ */
+function formatTraceEvent(
+  trace: NonNullable<ContainerOutput['trace']>,
+): string {
+  const MAX = 300;
+  const trunc = (s: string) =>
+    s.length > MAX ? `${s.slice(0, MAX)}…` : s;
+  if (trace.kind === 'tool_use') {
+    const label = trace.tool ? `*${trace.tool}*` : '*tool*';
+    return `🔧 ${label}\n${trunc(trace.summary)}`;
+  }
+  if (trace.kind === 'thinking') {
+    return `💭 ${trunc(trace.summary)}`;
+  }
+  if (trace.kind === 'interrupted') {
+    return `⏸ ${trace.summary || 'interrupted'}`;
+  }
+  return '';
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
@@ -285,6 +309,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
+    if (result.trace) {
+      const formatted = formatTraceEvent(result.trace);
+      if (formatted) {
+        try {
+          await channel.sendMessage(chatJid, formatted);
+        } catch (err) {
+          logger.debug({ err }, 'Trace event send failed');
+        }
+      }
+    }
+
     if (result.result) {
       const raw =
         typeof result.result === 'string'
@@ -392,6 +427,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        verbose: !getQuietMode(chatJid),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),

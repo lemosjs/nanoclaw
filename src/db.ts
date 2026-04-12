@@ -157,6 +157,17 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // quiet_mode=1 → only the final agent reply is sent. quiet_mode=0 → tool
+  // calls and intermediate reasoning are forwarded as separate messages too.
+  // Default is quiet (1) to preserve the stock NanoClaw UX.
+  try {
+    database.exec(
+      `ALTER TABLE chats ADD COLUMN quiet_mode INTEGER DEFAULT 1`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -233,6 +244,35 @@ export function updateChatName(chatJid: string, name: string): void {
     ON CONFLICT(jid) DO UPDATE SET name = excluded.name
   `,
   ).run(chatJid, name, new Date().toISOString());
+}
+
+/**
+ * Read the quiet_mode flag for a chat. Defaults to true (quiet) when the
+ * chat row does not yet exist or the column is unset.
+ */
+export function getQuietMode(chatJid: string): boolean {
+  const row = db
+    .prepare(`SELECT quiet_mode FROM chats WHERE jid = ?`)
+    .get(chatJid) as { quiet_mode: number | null } | undefined;
+  if (!row) return true;
+  return row.quiet_mode !== 0;
+}
+
+/**
+ * Toggle quiet_mode for a chat and return the new state (true = quiet).
+ * Creates the chat row if it doesn't exist yet.
+ */
+export function toggleQuietMode(chatJid: string): boolean {
+  const current = getQuietMode(chatJid);
+  const next = !current;
+  db.prepare(
+    `
+    INSERT INTO chats (jid, name, last_message_time, quiet_mode)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(jid) DO UPDATE SET quiet_mode = excluded.quiet_mode
+  `,
+  ).run(chatJid, chatJid, new Date().toISOString(), next ? 1 : 0);
+  return next;
 }
 
 export interface ChatInfo {

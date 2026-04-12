@@ -43,6 +43,24 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  /**
+   * When true, the agent-runner inside the container emits streamed trace
+   * events (tool calls, intermediate reasoning) in addition to the final
+   * result. Driven by the per-chat quiet_mode flag; see ContainerTraceEvent.
+   */
+  verbose?: boolean;
+}
+
+/**
+ * A streamed side-channel event from the agent-runner. Only emitted when
+ * the chat has quiet_mode=0 and NANOCLAW_VERBOSE=1 is passed into the
+ * container. Used to surface tool calls and intermediate reasoning in the
+ * user's chat without interfering with the final agent reply.
+ */
+export interface ContainerTraceEvent {
+  kind: 'tool_use' | 'thinking' | 'interrupted';
+  tool?: string;
+  summary: string;
 }
 
 export interface ContainerOutput {
@@ -50,6 +68,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  trace?: ContainerTraceEvent;
 }
 
 interface VolumeMount {
@@ -246,6 +265,7 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentIdentifier?: string,
+  verbose?: boolean,
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -259,6 +279,12 @@ async function buildContainerArgs(
   // root (which is required for file-permission compatibility when the host
   // NanoClaw service runs as root — see --user handling below).
   args.push('-e', 'IS_SANDBOX=1');
+
+  // When the chat has quiet_mode=0, surface tool calls and intermediate
+  // reasoning as streamed trace events back to the host. Off by default.
+  if (verbose) {
+    args.push('-e', 'NANOCLAW_VERBOSE=1');
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
@@ -335,6 +361,7 @@ export async function runContainerAgent(
     mounts,
     containerName,
     agentIdentifier,
+    input.verbose,
   );
 
   logger.debug(
