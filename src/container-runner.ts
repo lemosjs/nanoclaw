@@ -279,6 +279,13 @@ async function buildContainerArgs(
     '-e',
     'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host/usr/local/bin:/host/usr/bin:/host/root/.bun/bin',
   );
+  // Use host SSH keys for git operations
+  args.push(
+    '-e',
+    'GIT_SSH_COMMAND=ssh -i /host/root/.ssh/id_ed25519 -o StrictHostKeyChecking=no',
+  );
+  // Point HOME to host home for tools that need config files
+  args.push('-e', 'HOST_HOME=/host/root');
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
