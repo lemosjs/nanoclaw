@@ -171,7 +171,10 @@ export class TelegramChannel implements Channel {
                 // Container may have already exited
               }
             }
-            logger.info({ folder: group.folder }, 'Killed container for quiet toggle');
+            logger.info(
+              { folder: group.folder },
+              'Killed container for quiet toggle',
+            );
           }
         } catch {
           // No container running or docker command failed — that's fine

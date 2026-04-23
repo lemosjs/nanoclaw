@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -382,6 +382,30 @@ async function buildContainerArgs(
   return args;
 }
 
+function killExistingContainersForGroup(safeName: string): void {
+  try {
+    const output = execFileSync(
+      'docker',
+      ['ps', '-q', '--filter', `name=nanoclaw-${safeName}-`],
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    const ids = output.trim().split('\n').filter(Boolean);
+    for (const id of ids) {
+      try {
+        execFileSync('docker', ['kill', id], { stdio: 'ignore' });
+        logger.debug({ containerId: id, safeName }, 'Killed stale container for group');
+      } catch {
+        // Container may have already exited
+      }
+    }
+    if (ids.length > 0) {
+      logger.info({ count: ids.length, safeName }, 'Killed stale containers before new spawn');
+    }
+  } catch {
+    // No containers found or docker command failed
+  }
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -395,6 +419,10 @@ export async function runContainerAgent(
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
+
+  // Kill any existing containers for this group to prevent conflicts
+  killExistingContainersForGroup(safeName);
+
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
   const agentIdentifier = input.isMain

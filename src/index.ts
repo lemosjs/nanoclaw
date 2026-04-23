@@ -604,6 +604,24 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  // Prevent multiple instances with a PID file
+  const pidFile = path.join(process.cwd(), 'nanoclaw.pid');
+  if (fs.existsSync(pidFile)) {
+    const oldPid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    try {
+      // Check if process is still running (signal 0 doesn't kill, just checks)
+      process.kill(oldPid, 0);
+      logger.error({ oldPid }, 'Another instance is already running');
+      process.exit(1);
+    } catch {
+      // Process not running, stale PID file - continue
+    }
+  }
+  fs.writeFileSync(pidFile, process.pid.toString());
+  process.on('exit', () => {
+    try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+  });
+
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
