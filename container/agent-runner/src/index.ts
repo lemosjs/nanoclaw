@@ -67,11 +67,30 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+const IPC_DIR = '/workspace/ipc';
+const IPC_INPUT_DIR = path.join(IPC_DIR, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
+const IPC_QUIET_MODE_FILE = path.join(IPC_DIR, 'quiet_mode');
 const IPC_POLL_MS = 500;
-const VERBOSE = process.env.NANOCLAW_VERBOSE === '1';
+const VERBOSE_FROM_ENV = process.env.NANOCLAW_VERBOSE === '1';
+
+/**
+ * Read the current verbose/quiet state. The host writes `quiet_mode` on
+ * every /quiet toggle ("1" = quiet, "0" = verbose), so this takes effect
+ * mid-stream without killing the container. Falls back to the spawn-time
+ * env var when the file doesn't exist yet.
+ */
+function isVerbose(): boolean {
+  try {
+    const content = fs.readFileSync(IPC_QUIET_MODE_FILE, 'utf-8').trim();
+    if (content === '1') return false;
+    if (content === '0') return true;
+  } catch {
+    /* file missing — fall back to env */
+  }
+  return VERBOSE_FROM_ENV;
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -335,7 +354,7 @@ function shouldInterrupt(): boolean {
  * that have quiet_mode disabled.
  */
 function writeTrace(event: ContainerTraceEvent): void {
-  if (!VERBOSE) return;
+  if (!isVerbose()) return;
   writeOutput({
     status: 'success',
     result: null,
@@ -617,7 +636,7 @@ async function runQuery(
 
       // Verbose mode: surface tool calls and intermediate reasoning as
       // streamed trace events so the user can see what the agent is doing.
-      if (VERBOSE) {
+      if (isVerbose()) {
         const blocks =
           (message as {
             message?: {

@@ -1,4 +1,3 @@
-import { execFileSync } from 'child_process';
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
@@ -141,43 +140,27 @@ export class TelegramChannel implements Channel {
     });
 
     // /quiet — toggle whether tool calls and intermediate reasoning are shown
-    // in this chat. Default is quiet (only the final answer).
-    // Also kills any running container so the new setting takes effect immediately.
+    // in this chat. Default is quiet (only the final answer). Writes the new
+    // state to the group's IPC dir so the running container picks it up on
+    // the next trace event — takes effect mid-stream without destroying the
+    // in-flight query.
     this.bot.command('quiet', (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const isQuiet = toggleQuietMode(chatJid);
       logger.info({ chatJid, isQuiet }, 'Toggled quiet mode');
 
-      // Kill running container so new setting takes effect on next message
       const groups = this.opts.registeredGroups();
       const group = groups[chatJid];
       if (group) {
-        const safeName = group.folder.replace(/[^a-zA-Z0-9_-]/g, '-');
         try {
-          // Get container IDs matching this group's name pattern
-          const ids = execFileSync('docker', [
-            'ps',
-            '-q',
-            '--filter',
-            `name=nanoclaw-${safeName}`,
-          ])
-            .toString()
-            .trim();
-          if (ids) {
-            for (const id of ids.split('\n')) {
-              try {
-                execFileSync('docker', ['kill', id], { stdio: 'ignore' });
-              } catch {
-                // Container may have already exited
-              }
-            }
-            logger.info(
-              { folder: group.folder },
-              'Killed container for quiet toggle',
-            );
-          }
-        } catch {
-          // No container running or docker command failed — that's fine
+          const ipcDir = resolveGroupIpcPath(group.folder);
+          fs.mkdirSync(ipcDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(ipcDir, 'quiet_mode'),
+            isQuiet ? '1' : '0',
+          );
+        } catch (err) {
+          logger.warn({ chatJid, err }, 'Failed to write quiet_mode file');
         }
       }
 
