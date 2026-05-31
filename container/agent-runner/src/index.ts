@@ -492,10 +492,11 @@ async function runQuery(
             `Query.interrupt() failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         });
-      } else {
-        // SDK too old for control channel — fall back to ending the stream.
-        stream.end();
       }
+      // Query.interrupt() cancels in-flight generation but leaves the user-input
+      // iterator open waiting for the next turn — without end() the for-await
+      // hangs forever and the outer loop never reaches waitForIpcMessage().
+      stream.end();
       // Stop polling and stop draining IPC. Any pending user messages sent
       // between /stop and the interrupt landing stay in the IPC dir and
       // become the next query's prompt via the outer loop's waitForIpcMessage().
